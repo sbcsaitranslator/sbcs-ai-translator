@@ -1,0 +1,80 @@
+# === OS junk ===
+.DS_Store
+Thumbs.db
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+.eggs/
+*.egg-info/
+*.egg
+__pypackages__/
+
+# === Testing / Type / Coverage ===
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.pytype/
+coverage.xml
+
+# === Logs ===
+*.log
+logs/
+
+# === Build / Dist / Artifacts ===
+dist/
+build/
+site/
+*.zip
+*.tar.gz
+*.whl
+worker.zip
+webjob_pkg/
+
+# === Azure / Oryx artifacts (runtime generated) ===
+oryx-manifest.toml
+oryx-env.json
+
+# WebJob runtime folders (dibuat saat deploy/berjalan)
+App_Data/
+
+# === Env & Secrets (jangan commit) ===
+.env
+.env.*
+!.env.example
+*.PublishSettings
+*.pubxml
+*.pubxml.user
+
+# === Editors / IDEs ===
+.vscode/
+*.code-workspace
+.idea/
+
+# === Databases / local files ===
+*.db
+*.sqlite3
+instance/
+
+# === Jupyter ===
+.ipynb_checkpoints/
+
+# === Project-specific temporary ===
+optimize.zip
+alhamdulillah_1.zip
+alhamdulillah2.zip
+alhamdulillah3.zip
+optimize_final.zip
+OPTIMIZE.zip
+optimize2.zip
+testing.zip
+*.zip
+up.py

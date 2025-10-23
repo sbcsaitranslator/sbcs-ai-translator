@@ -1,0 +1,2 @@
+app bot create_structure.py gunicorn.api.conf.py gunicorn.bot.conf.py requirements-api.txt requirements-worker.txt server.py test.py webjob worker text=auto
+*.sh text eol=lf
