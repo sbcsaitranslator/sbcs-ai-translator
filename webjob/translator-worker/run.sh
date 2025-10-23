@@ -1,93 +1,43 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-log()      { echo "[$(ts)] [INFO] $*"; }
-log_run()  { echo "[$(ts)] [RUN] $*"; }
-log_warn() { echo "[$(ts)] [WARN] $*"; }
-
-# === Lokasi job & packages ===
-JOBDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ==== Konfigurasi path ====
+JOBDIR="/home/site/wwwroot/App_Data/jobs/continuous/translator-worker"
 SITEPKG="/home/site/wwwroot/.python_packages/lib/site-packages"
 
-# === Opsi venv (disarankan) ===
-VENV_DIR="${VENV_DIR:-/home/antenv}"
-USE_VENV="${USE_VENV:-1}"     # 1=pakai venv, 0=tanpa venv
-SKIP_PIP="${SKIP_PIP:-1}"     # 1=skip install tiap start
-REQ="${PIP_REQ_FILE:-requirements.txt}"
-
-# === Env dasar ===
+# ==== Env umum ====
+export TZ=UTC
 export PYTHONDONTWRITEBYTECODE=1
-export PYTHONUNBUFFERED=1
-export PIP_ROOT_USER_ACTION=ignore
-export PYTHONPATH="${JOBDIR}:${SITEPKG}:${PYTHONPATH:-}"
+export PIP_ROOT_USER_ACTION=ignore  # redam warning pip "run as root"
+export PYTHONPATH="${JOBDIR}:${SITEPKG}:${PYTHONPATH-}"
 
+# Tangani stop dari platform dengan log rapi
+trap 'echo "[$(date -u +%FT%TZ)] [INFO] SIGTERM/INT diterima, keluar..."; exit 0' INT TERM
+
+# Identitas sumber launch (manual vs webjob)
+LAUNCH_SRC="manual"
+if [ -n "${WEBJOBS_NAME-}" ]; then
+  LAUNCH_SRC="webjob:${WEBJOBS_NAME}"
+fi
+
+echo "[$(date -u +%FT%TZ)] [BOOT] run.sh start ($LAUNCH_SRC)"
+
+# Pindah ke folder job
 cd "$JOBDIR"
 
-# Muat .env jika ada
-if [[ -f ".env" ]]; then set -a; source ".env"; set +a; fi
-
-# Virtualenv (opsional)
-if [[ "$USE_VENV" = "1" ]]; then
-  if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
-    log "Membuat venv di ${VENV_DIR}"
-    python -m venv "${VENV_DIR}"
-  fi
-  # shellcheck disable=SC1090
-  source "${VENV_DIR}/bin/activate"
-  log "VENV aktif: $(python -V)"
-fi
-
-# Install once (opsional)
-if [[ "$SKIP_PIP" != "1" && -f "$REQ" ]]; then
-  log "Install requirements dari ${REQ}"
-  pip install --upgrade pip wheel
-  pip install -r "$REQ"
-fi
-
-# === Checks (menampilkan baris [CHK] seperti contoh) ===
-python - <<'PY' || true
-import sys
-print("[CHK] sys.path[0:3] =", sys.path[:3])
-try:
-    import worker
-    print("[CHK] worker available? ", True)
-except Exception as e:
-    print("[CHK] worker import failed:", e)
+# Cek modul & sys.path
+python - <<'PY'
+import sys, importlib.util
+print(f"[CHK] sys.path[0:3] = {sys.path[:3]}")
+print(f"[CHK] worker available?  {importlib.util.find_spec('worker') is not None}")
 PY
 
-# === Graceful stop dari platform WebJobs ===
-SHUTDOWN_FILE="${WEBJOBS_SHUTDOWN_FILE:-/tmp/WEBJOBS_SHUTDOWN_FILE}"
-trap 'log "SIGTERM/INT diterima, keluar..."; exit 0' TERM INT
+# Coba jalankan sebagai modul (hanya jika struktur modul mendukung)
+echo "[$(date -u +%FT%TZ)] [RUN] starting: python -u -m worker.worker"
+if python -u -m worker.worker 2>/tmp/worker_mod.err; then
+  exit 0
+fi
 
-# === Loop jalan & auto-restart kalau crash ===
-while true; do
-  [[ -f "$SHUTDOWN_FILE" ]] && log "Shutdown file terdeteksi, stop." && exit 0
-
-  # Try as module
-  log_run "starting: python -u -m worker.worker"
-  set +e
-  python -u -m worker.worker
-  rc=$?
-  set -e
-
-  if [[ $rc -eq 0 ]]; then
-    log "Proses selesai (rc=0)"
-    exit 0
-  fi
-
-  # Fallback: langsung ke file
-  log_run "fallback: python -u worker/worker.py"
-  set +e
-  python -u worker/worker.py
-  rc=$?
-  set -e
-
-  if [[ $rc -eq 0 ]]; then
-    log "Fallback selesai (rc=0)"
-    exit 0
-  fi
-
-  log_warn "Gagal (rc=${rc}). Retry dalam 3 detik..."
-  sleep 3
-done
+# Fallback ke file (yang memang bekerja di struktur kamu)
+echo "[$(date -u +%FT%TZ)] [RUN] fallback: python -u worker/worker.py"
+exec python -u worker/worker.py
