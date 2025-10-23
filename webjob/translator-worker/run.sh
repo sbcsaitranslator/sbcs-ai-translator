@@ -1,80 +1,68 @@
 #!/usr/bin/env bash
-# run.sh — bootstrap & start translator-worker on Azure Web App (Linux)
-
 set -Eeuo pipefail
 
-# --- Paths (override via env if needed)
-JOBDIR="${JOBDIR:-/home/site/wwwroot/App_Data/jobs/continuous/translator-worker}"
-SITEPKG="${SITEPKG:-/home/site/wwwroot/.python_packages/lib/site-packages}"
+ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+log() { echo "[$(ts)] $*"; }
 
-# --- Pick python
-if [[ -x /opt/python/3/bin/python ]]; then
-  PYTHON=/opt/python/3/bin/python
-elif command -v python3 >/dev/null 2>&1; then
-  PYTHON=$(command -v python3)
-else
-  PYTHON=$(command -v python)
-fi
+# Lokasi job & site-packages
+JOBDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SITEPKG="/home/site/wwwroot/.python_packages/lib/site-packages"
 
-log(){ printf '[%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*" ; }
+# (opsional) venv di /home agar persist & tanpa warning pip root
+VENV_DIR="${VENV_DIR:-/home/antenv}"
+USE_VENV="${USE_VENV:-1}"          # set USE_VENV=0 untuk menonaktifkan venv
+SKIP_PIP="${SKIP_PIP:-0}"          # set SKIP_PIP=1 untuk skip pip install
 
-log "JOBDIR=$JOBDIR"
-log "SITEPKG=$SITEPKG"
-log "PYTHON=$PYTHON"
-
-# --- Env for reliable imports & unbuffered logs
-export PYTHONUNBUFFERED=1
+# Env dasar
 export PYTHONDONTWRITEBYTECODE=1
-export PYTHONPATH="${JOBDIR}:${SITEPKG}:${PYTHONPATH:-}"
-# (optional) quiet the root pip warning
 export PIP_ROOT_USER_ACTION=ignore
+export PYTHONPATH="${JOBDIR}:${SITEPKG}:${PYTHONPATH:-}"
 
-# --- Go to job dir
 cd "$JOBDIR"
 
-# --- Optional install deps (skip with SKIP_PIP=1)
-if [[ "${SKIP_PIP:-0}" != "1" ]]; then
-  if [[ -f "$JOBDIR/requirements.txt" ]]; then
-    log "Installing requirements into SITEPKG…"
-    "$PYTHON" -m pip install \
-      --disable-pip-version-check \
-      --no-cache-dir \
-      --upgrade \
-      --upgrade-strategy only-if-needed \
-      --target "$SITEPKG" \
-      -r "$JOBDIR/requirements.txt"
-  else
-    log "No requirements.txt found — skipping pip install."
-  fi
-else
-  log "SKIP_PIP=1 — skipping pip install."
+# Muat .env jika ada
+if [[ -f ".env" ]]; then
+  set -a; source ".env"; set +a
 fi
 
-# --- Sanity check imports (helps diagnose path issues fast)
-log "Checking module availability…"
-"$PYTHON" - <<'PY' || { echo "[ERR] Import check failed"; exit 1; }
-import sys, importlib.util as s
-print("[CHK] sys.path[0:3] =", sys.path[0:3])
-print("[CHK] has 'worker'       :", bool(s.find_spec("worker")))
-print("[CHK] has 'worker.worker':", bool(s.find_spec("worker.worker")))
+# Buat/aktifkan venv (opsional)
+if [[ "$USE_VENV" = "1" ]]; then
+  if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
+    log "Membuat venv di ${VENV_DIR}"
+    python -m venv "${VENV_DIR}"
+  fi
+  # shellcheck disable=SC1090
+  source "${VENV_DIR}/bin/activate"
+  log "VENV aktif: $(python -V)"
+fi
+
+# Instal requirements (jika ada)
+if [[ -f "requirements.txt" && "$SKIP_PIP" != "1" ]]; then
+  log "Install requirements..."
+  pip install --upgrade pip wheel
+  pip install -r requirements.txt
+fi
+
+# Cek import & sys.path (debug singkat)
+python - <<'PY' || true
+import sys
+print("[CHK] sys.path[0:3] =", sys.path[:3])
+try:
+    import worker
+    print("[CHK] worker available? ", True)
+except Exception as e:
+    print("[CHK] worker import failed:", e)
 PY
 
-# --- Graceful shutdown
-_term(){ log "Signal caught, stopping…"; kill -TERM "${child:-0}" 2>/dev/null || true; wait "${child:-0}" 2>/dev/null || true; }
-trap _term INT TERM
-
-# --- Start the worker (as a module). Fallback to file-path if needed.
-log "Starting: python -u -m worker.worker"
+# Jalankan: prefer modul package (benar: titik, bukan slash)
 set +e
-"$PYTHON" -u -m worker.worker "$@" &
-child=$!
-wait $child
+log "[RUN] starting: python -u -m worker.worker"
+python -u -m worker.worker
 rc=$?
 set -e
 
+# Fallback jika -m gagal
 if [[ $rc -ne 0 ]]; then
-  log "Module launch failed (rc=$rc). Falling back: python -u worker/worker.py"
-  exec "$PYTHON" -u "$JOBDIR/worker/worker.py" "$@"
-else
-  exit 0
+  log "[RUN] fallback: python -u worker/worker.py"
+  exec python -u worker/worker.py
 fi
