@@ -25,7 +25,7 @@ exec >>"$LOGFILE" 2>&1
 log "===== [BOOT] Worker starting ====="
 echo "STARTING ts=$(date -Is) pid=$$" > "$STATUS_FILE"
 
-# ---------- Env hygiene ----------
+# ---- ENV ----
 unset VIRTUAL_ENV || true
 PATH="$(echo "$PATH" | awk -v RS=: -v ORS=: '($0!~/\/\.venv\// && $0!~/^\/tmp\//){print}' | sed 's/:$//')"
 export PATH
@@ -33,30 +33,27 @@ export LANG=C.UTF-8 LC_ALL=C.UTF-8 HOME=/home
 export PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 export PYTHONPATH="$JOBDIR:$SITEPKG${PYTHONPATH:+:$PYTHONPATH}"
 export TMPDIR
-# pip: hemat memori
 export PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_DEFAULT_TIMEOUT=60 PIP_PREFER_BINARY=1
-kv "[ENV]" python="$(command -v python)" pip="$(command -v pip)" tmp="$TMPDIR"
+# log limit mem cgroup (lebih akurat)
+if [ -r /sys/fs/cgroup/memory.max ]; then kv "[CGROUP]" mem_max="$(cat /sys/fs/cgroup/memory.max)"; fi
+if [ -r /sys/fs/cgroup/memory.high ]; then kv "[CGROUP]" mem_high="$(cat /sys/fs/cgroup/memory.high)"; fi
 python - <<'PY'
 import sys, os
 print(f"[ENV] Python={sys.version.split()[0]} cwd={os.getcwd()}")
 try:
-    mem=dict(x.split(":") for x in open("/proc/meminfo") if ":" in x)
-    print("[ENV] MemAvailable(kB)=", mem.get("MemAvailable","?").strip())
+    m = {k:v for k,v in (ln.split(':',1) for ln in open('/proc/meminfo') if ':' in ln)}
+    print("[ENV] MemAvailable(kB)=", m.get("MemAvailable","?").strip())
 except Exception as e:
     print("[ENV] Mem info n/a:", e)
 PY
 
-# ---------- Single instance ----------
+# ---- LOCK ----
 exec 200>"$LOCKFILE"
-if ! flock -n 200; then
-  log "[LOCK] Another instance running -> exit"
-  echo "LOCKED ts=$(date -Is)" > "$STATUS_FILE"
-  exit 0
-fi
+flock -n 200 || { log "[LOCK] Another instance running -> exit"; echo "LOCKED ts=$(date -Is)" > "$STATUS_FILE"; exit 0; }
 log "[LOCK] OK"
 
-# ---------- Cleanup path dupe ----------
-if [ -d "$JOBDIR/worker/worker" ]; then rm -rf "$JOBDIR/worker/worker"; log "[CLEAN] Removed worker/worker"; fi
+# ---- CLEAN ----
+[ -d "$JOBDIR/worker/worker" ] && { rm -rf "$JOBDIR/worker/worker"; log "[CLEAN] Removed worker/worker"; }
 
 REQ="$JOBDIR/requirements.txt"
 NEED_INSTALL=0
@@ -66,7 +63,7 @@ if [ -f "$REQ" ]; then
   if [ "$CURHASH" != "$OLDHASH" ]; then
     NEED_INSTALL=1
     : > "$PIP_OK_FILE"
-    log "[PIP] requirements changed -> per-package install mode"
+    log "[PIP] requirements changed -> wheel mode"
   else
     log "[PIP] requirements unchanged"
   fi
@@ -74,107 +71,91 @@ else
   log "[PIP] requirements.txt not found -> skip"
 fi
 
-# ---------- Helpers ----------
-memlog(){ awk '/MemAvailable/{print "[MEM]",$2" "$3}' /proc/meminfo 2>/dev/null || true; }
+# ---- helper: baca requirements (tanpa komentar/kosong) ----
+read_requirements(){ awk '!/^\s*($|#)/{print $0}' "$REQ" | sed 's/\r$//'; }
 
-read_requirements(){
-  awk '!/^\s*($|#)/{print $0}' "$REQ" | sed 's/\r$//'
+# ---- helper: download lalu install wheel satu-per-satu ----
+download_and_install(){
+  local spec="$1"
+  local name="$(echo "$spec" | sed 's/[<>=!~;].*$//' | tr A-Z a-z | tr '_' '-')"
+  local WDIR="$JOBDIR/.wheels/$name"
+  rm -rf "$WDIR"; mkdir -p "$WDIR"
+
+  kv "[WHEEL] downloading" spec="$spec" dir="$WDIR"
+  # Ambil spec + semua dependency dalam bentuk wheel
+  if ! python -m pip download --only-binary=:all: -d "$WDIR" "$spec"; then
+    log "[WHEEL] download FAIL for $spec"; return 1
+  fi
+
+  # install tiap wheel satu-satu (no-deps) agar tidak agregasi banyak paket dalam satu proses
+  shopt -s nullglob
+  # install beberapa dependency dasar dulu kalau ada
+  for first in typing_extensions idna six charset_normalizer urllib3 certifi; do
+    for wh in "$WDIR"/$first-*.whl; do
+      kv "[WHEEL] install" file="$(basename "$wh")"
+      python -m pip install --no-deps --no-compile --no-cache-dir --target "$SITEPKG" "$wh" || return 1
+      rm -f "$wh"
+    done
+  done
+  # install sisanya satu-per-satu
+  for wh in "$WDIR"/*.whl; do
+    kv "[WHEEL] install" file="$(basename "$wh")"
+    python -m pip install --no-deps --no-compile --no-cache-dir --target "$SITEPKG" "$wh" || return 1
+  done
+  shopt -u nullglob
+  return 0
 }
 
-# urutkan: beberapa paket diprioritaskan (lebih kecil graf dependensinya)
-prioritize(){
-  # nama-nama tanpa versi (akan dicocokkan prefix case-insensitive)
-  PRI="msrest
-typing-extensions
-six
-idna
-certifi
-urllib3
-charset-normalizer
-anyio
-httpcore
-httpx
-requests
-isodate
-cryptography
-msal
-msal-extensions
-azure-core
-azure-identity
-azure-storage-blob
-azure-storage-queue
-pydantic
-pydantic-settings
-fastapi
-uvicorn
-gunicorn
-aiohttp"
-  awk 'BEGIN{IGNORECASE=1}
-    NR==FNR{pri[$0]=1; order[++i]=$0; next}
-    {
-      line=$0; name=line;
-      sub(/[<=>].*$/,"",name); gsub(/[_]/,"-",name);
-      if(pri[name]) { print "P|" line; next }
-      for(j=1;j<=i;j++){ if(index(tolower(name),tolower(order[j]))==1){ print "P|" line; next } }
-      print "N|" line
-    }' <(echo "$PRI") - \
-  | sort -t'|' -k1,1r \
-  | cut -d'|' -f2
-}
+install_spec(){
+  local spec="$1"
+  # skip jika sudah sukses sebelumnya
+  if [ -s "$PIP_OK_FILE" ] && grep -Fxq "$spec" "$PIP_OK_FILE"; then
+    log "[PIP] SKIP (done) $spec"; return 0; fi
 
-install_one(){
-  local pkg="$1"
-  memlog
+  # retry 3x
   for i in 1 2 3; do
-    if python -m pip install --no-cache-dir --no-compile --root-user-action=ignore --target "$SITEPKG" "$pkg"; then
-      echo "$pkg" >> "$PIP_OK_FILE"
-      log "[PIP] OK $pkg"
+    if download_and_install "$spec"; then
+      echo "$spec" >> "$PIP_OK_FILE"
+      log "[PIP] OK $spec"
       return 0
     else
-      kv "[PIP] FAIL" pkg="$pkg" attempt="$i" sleep="$((i*7))s"
-      sleep $((i*7))
+      kv "[PIP] FAIL" spec="$spec" attempt="$i" sleep="$((i*8))s"
+      sleep $((i*8))
     fi
   done
+  log "[PIP] GIVE UP $spec"
   return 1
 }
 
-# ---------- STEP: per-package install ----------
+# ---- INSTALL LOOP (selalu per-baris, via wheel mode) ----
 if [ "$NEED_INSTALL" -eq 1 ]; then
-  log "---- [STEP] Per-package installing (no full-install to avoid OOM)"
+  log "---- [STEP] Installing requirements via wheels (no multi-package install)"
   python -m pip install --upgrade pip wheel --root-user-action=ignore || true
 
-  mapfile -t ALL < <(read_requirements | prioritize)
+  mapfile -t SPECS < <(read_requirements)
 
-  total=${#ALL[@]}
+  total=${#SPECS[@]}
   n=0
-  for pkg in "${ALL[@]}"; do
-    # skip yang sudah OK (progress survive restart)
-    if [ -s "$PIP_OK_FILE" ] && grep -Fxq "$pkg" "$PIP_OK_FILE"; then
-      log "[PIP] SKIP (done) $pkg"; n=$((n+1)); continue
-    fi
-    log "[PIP] Installing ($((n+1))/$total): $pkg"
-    if ! install_one "$pkg"; then
-      log "[PIP] GIVE UP on $pkg (will try next boot)"; break
-    fi
+  for spec in "${SPECS[@]}"; do
     n=$((n+1))
+    log "[PIP] Installing ($n/$total): $spec"
+    install_spec "$spec" || { log "[PIP] Will resume next boot"; break; }
   done
 
-  # jika semua baris di requirements sudah masuk ke PIP_OK_FILE → tandai selesai
   need=$(awk '!/^\s*($|#)/{c++} END{print c+0}' "$REQ")
   donecnt=$(grep -v '^\s*$' "$PIP_OK_FILE" 2>/dev/null | wc -l | awk '{print $1}')
   kv "[PIP] progress" done="$donecnt" total="$need"
+
   if [ "$donecnt" -ge "$need" ]; then
     sha256sum "$REQ" | awk '{print $1}' > "$REQHASH"
     log "[PIP] All requirements installed."
-  else
-    log "[PIP] Incomplete; next restart will resume."
   fi
 
   DU=$(du -sh "$SITEPKG" | awk '{print $1}')
   kv "[PIP] site-packages size" size="$DU"
 fi
 
-# ---------- Sanity check ----------
+# ---- SANITY CHECK & LAUNCH ----
 log "---- [STEP] Sanity check imports"
 if python - <<'PY'
 import importlib.util as iu
