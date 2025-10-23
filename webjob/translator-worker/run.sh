@@ -2,30 +2,32 @@
 set -Eeuo pipefail
 
 ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
-log() { echo "[$(ts)] $*"; }
+log()      { echo "[$(ts)] [INFO] $*"; }
+log_run()  { echo "[$(ts)] [RUN] $*"; }
+log_warn() { echo "[$(ts)] [WARN] $*"; }
 
-# Lokasi job & site-packages
+# === Lokasi job & packages ===
 JOBDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SITEPKG="/home/site/wwwroot/.python_packages/lib/site-packages"
 
-# (opsional) venv di /home agar persist & tanpa warning pip root
+# === Opsi venv (disarankan) ===
 VENV_DIR="${VENV_DIR:-/home/antenv}"
-USE_VENV="${USE_VENV:-1}"          # set USE_VENV=0 untuk menonaktifkan venv
-SKIP_PIP="${SKIP_PIP:-0}"          # set SKIP_PIP=1 untuk skip pip install
+USE_VENV="${USE_VENV:-1}"     # 1=pakai venv, 0=tanpa venv
+SKIP_PIP="${SKIP_PIP:-1}"     # 1=skip install tiap start
+REQ="${PIP_REQ_FILE:-requirements.txt}"
 
-# Env dasar
+# === Env dasar ===
 export PYTHONDONTWRITEBYTECODE=1
+export PYTHONUNBUFFERED=1
 export PIP_ROOT_USER_ACTION=ignore
 export PYTHONPATH="${JOBDIR}:${SITEPKG}:${PYTHONPATH:-}"
 
 cd "$JOBDIR"
 
 # Muat .env jika ada
-if [[ -f ".env" ]]; then
-  set -a; source ".env"; set +a
-fi
+if [[ -f ".env" ]]; then set -a; source ".env"; set +a; fi
 
-# Buat/aktifkan venv (opsional)
+# Virtualenv (opsional)
 if [[ "$USE_VENV" = "1" ]]; then
   if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
     log "Membuat venv di ${VENV_DIR}"
@@ -36,14 +38,14 @@ if [[ "$USE_VENV" = "1" ]]; then
   log "VENV aktif: $(python -V)"
 fi
 
-# Instal requirements (jika ada)
-if [[ -f "requirements.txt" && "$SKIP_PIP" != "1" ]]; then
-  log "Install requirements..."
+# Install once (opsional)
+if [[ "$SKIP_PIP" != "1" && -f "$REQ" ]]; then
+  log "Install requirements dari ${REQ}"
   pip install --upgrade pip wheel
-  pip install -r requirements.txt
+  pip install -r "$REQ"
 fi
 
-# Cek import & sys.path (debug singkat)
+# === Checks (menampilkan baris [CHK] seperti contoh) ===
 python - <<'PY' || true
 import sys
 print("[CHK] sys.path[0:3] =", sys.path[:3])
@@ -54,15 +56,38 @@ except Exception as e:
     print("[CHK] worker import failed:", e)
 PY
 
-# Jalankan: prefer modul package (benar: titik, bukan slash)
-set +e
-log "[RUN] starting: python -u -m worker.worker"
-python -u -m worker.worker
-rc=$?
-set -e
+# === Graceful stop dari platform WebJobs ===
+SHUTDOWN_FILE="${WEBJOBS_SHUTDOWN_FILE:-/tmp/WEBJOBS_SHUTDOWN_FILE}"
+trap 'log "SIGTERM/INT diterima, keluar..."; exit 0' TERM INT
 
-# Fallback jika -m gagal
-if [[ $rc -ne 0 ]]; then
-  log "[RUN] fallback: python -u worker/worker.py"
-  exec python -u worker/worker.py
-fi
+# === Loop jalan & auto-restart kalau crash ===
+while true; do
+  [[ -f "$SHUTDOWN_FILE" ]] && log "Shutdown file terdeteksi, stop." && exit 0
+
+  # Try as module
+  log_run "starting: python -u -m worker.worker"
+  set +e
+  python -u -m worker.worker
+  rc=$?
+  set -e
+
+  if [[ $rc -eq 0 ]]; then
+    log "Proses selesai (rc=0)"
+    exit 0
+  fi
+
+  # Fallback: langsung ke file
+  log_run "fallback: python -u worker/worker.py"
+  set +e
+  python -u worker/worker.py
+  rc=$?
+  set -e
+
+  if [[ $rc -eq 0 ]]; then
+    log "Fallback selesai (rc=0)"
+    exit 0
+  fi
+
+  log_warn "Gagal (rc=${rc}). Retry dalam 3 detik..."
+  sleep 3
+done
