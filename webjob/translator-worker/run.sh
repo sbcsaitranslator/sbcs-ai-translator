@@ -1,91 +1,59 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# === Lokasi & environment ===
-JOBDIR="${JOBDIR:-/home/site/wwwroot/App_Data/jobs/continuous/translator-worker}"
-SITEPKG="${SITEPKG:-/home/site/wwwroot/.python_packages/lib/site-packages}"
-REQFILE_DEFAULT="$JOBDIR/requirements.txt"
-REQFILE_WORKER="$JOBDIR/requirements-worker.txt"   # <- pakai ini untuk worker
-REQFILE="${REQFILE:-$([ -f "$REQFILE_WORKER" ] && echo "$REQFILE_WORKER" || echo "$REQFILE_DEFAULT")}"
-
-WHEELSDIR="$JOBDIR/.wheels"
-TMPDIR="/home/site/wwwroot/.tmp"
+# ====== Konfigurasi path ======
+JOBDIR="/home/site/wwwroot/App_Data/jobs/continuous/translator-worker"
+SITEPKG_ROOT="/home/site/wwwroot/.python_packages"
+SITEPKG="$SITEPKG_ROOT/lib/site-packages"
 LOG="/home/LogFiles/WebJobs/translator-worker.out"
+REQFILE="$JOBDIR/requirements.txt"  # khusus worker
 
-mkdir -p "$SITEPKG" "$WHEELSDIR" "$TMPDIR" "$(dirname "$LOG")"
-touch "$LOG"
-
-export PYTHONUNBUFFERED=1
-export PYTHONDONTWRITEBYTECODE=1
-export PYTHONPATH="$JOBDIR:$SITEPKG:${PYTHONPATH:-}"
-export TMPDIR
+# ====== Env hemat IO/mem ======
 export PIP_NO_CACHE_DIR=1
-export PIP_DISABLE_PIP_VERSION_CHECK=1
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="$JOBDIR:$SITEPKG:${PYTHONPATH:-}"
 
-log() { printf '[%s] %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$LOG" ; }
+# ====== Helper logging ======
+_ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+log()  { echo "[$(_ts)] $*" | tee -a "$LOG"; }
 
-# === Fungsi kecil ===
-unzip_wheel() {
-  local wh="$1"
-  python - <<'PY' "$wh" "$SITEPKG"
-import sys, zipfile, pathlib
-wh, target = sys.argv[1], sys.argv[2]
-pathlib.Path(target).mkdir(parents=True, exist_ok=True)
-with zipfile.ZipFile(wh) as z:
-    z.extractall(target)
-print(f"[UNZIP] extracted {wh} -> {target}")
-PY
-}
+# ====== Bersih sisa proses/install ======
+pkill -f "python -u -m worker" 2>/dev/null || true
+pkill -f "pip " 2>/dev/null || true
 
-install_wheel_safe() {
-  local wh="$1"
-  log "[WHEEL] install $(basename "$wh")"
-  if ! python -m pip install --no-deps --no-compile --no-cache-dir --target "$SITEPKG" "$wh" >>"$LOG" 2>&1; then
-    log "[WHEEL] pip failed -> fallback unzip ($(basename "$wh"))"
-    unzip_wheel "$wh" >>"$LOG" 2>&1 || { log "[WHEEL] unzip FAILED $(basename "$wh")"; return 1; }
-  fi
-}
+mkdir -p "$SITEPKG" "$(dirname "$LOG")"
+: > "$LOG"
 
-# === Deteksi perubahan requirements ===
-REQHASH_FILE="$JOBDIR/.req.hash"
-if [ ! -f "$REQFILE" ]; then
-  log "[PIP] requirements file not found: $REQFILE"
-  exit 1
-fi
-NEWHASH="$(sha256sum "$REQFILE" | awk '{print $1}')"
-OLDHASH="$(cat "$REQHASH_FILE" 2>/dev/null || true)"
+log "===== [BOOT] Worker starting ====="
+log "[ENV] Python=$(python -V 2>&1) cwd=$JOBDIR"
+log "[ENV] PYTHONPATH=$PYTHONPATH"
 
-# === Install deps jika perlu ===
-if [ "$NEWHASH" != "$OLDHASH" ]; then
-  log "[PIP] requirements changed -> installing from $REQFILE"
-  # 1) Download semua wheel (binary only) dulu
-  log "[WHEEL] downloading wheels to $WHEELSDIR"
-  rm -rf "$WHEELSDIR"/* || true
-  # coba beberapa kali untuk jaringan yang flakey
-  n=0; until [ $n -ge 3 ]; do
-    if python -m pip download --only-binary=:all: -r "$REQFILE" -d "$WHEELSDIR" >>"$LOG" 2>&1; then
-      break
-    fi
-    n=$((n+1)); log "[WHEEL] download retry $n/3"; sleep 3
-  done
-
-  # 2) Install per wheel berdasar ukuran (kecil dulu = lebih irit memori)
-  mapfile -t WHEELS < <(find "$WHEELSDIR" -type f -name '*.whl' -printf '%s\t%p\n' | sort -n | cut -f2-)
-  if [ "${#WHEELS[@]}" -eq 0 ]; then
-    log "[WHEEL] no wheels downloaded. Check your requirements."
-  fi
-  for wh in "${WHEELS[@]}"; do
-    install_wheel_safe "$wh"
-  done
-
-  echo "$NEWHASH" > "$REQHASH_FILE"
-  log "[PIP] DONE"
+# ====== Install requirements worker ======
+if [[ -s "$REQFILE" ]]; then
+  log "[PIP] Installing worker requirements from $REQFILE"
+  python -m pip install --upgrade pip wheel >>"$LOG" 2>&1
+  python -m pip install --no-compile --no-cache-dir -t "$SITEPKG" -r "$REQFILE" >>"$LOG" 2>&1
 else
-  log "[PIP] requirements unchanged -> skip install"
+  log "[PIP] WARNING: $REQFILE not found or empty; skip install"
 fi
 
-# === Jalankan worker ===
+# ====== Sanity check import ======
+python - <<'PY' 2>>"$LOG" | tee -a "$LOG"
+import sys, pkgutil
+print("[CHK] sys.path[0:3] =", sys.path[:3])
+print("[CHK] worker available? ", bool(pkgutil.find_loader("worker")))
+PY
+
+# ====== Start worker ======
 cd "$JOBDIR"
-log "[RUN] PYTHONPATH=$PYTHONPATH"
-log "[RUN] starting: python -u -m worker.worker"
-exec python -u -m worker.worker >>"$LOG" 2>&1
+
+# Opsi A (lebih sederhana & aman): jalankan paket top-level 'worker'
+CMD=(python -u -m worker)
+
+# Jika kamu benar² butuh subpaket (dan SUDAH bikin worker/worker/__main__.py), ganti ke:
+# CMD=(python -u -m worker.worker)
+
+log "[RUN] starting: ${CMD[*]}"
+# jalankan di foreground supaya WebJob menganggap proses ini 'running'
+exec "${CMD[@]}" >>"$LOG" 2>&1
