@@ -49,10 +49,8 @@ PY
 cd "$JOBDIR"
 
 # Opsi A (lebih sederhana & aman): jalankan paket top-level 'worker'
-CMD=(python -u -m worker/worker.py)
+CMD=(python -u -m worker.worker)
 
-# Jika kamu benar² butuh subpaket (dan SUDAH bikin worker/worker/__main__.py), ganti ke:
-# CMD=(python -u -m worker.worker)
 
 log "[RUN] starting: ${CMD[*]}"
 # jalankan di foreground supaya WebJob menganggap proses ini 'running'
