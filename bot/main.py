@@ -949,7 +949,7 @@ class SBCSBot(TeamsActivityHandler):
             connection_name=OAUTH_CONNECTION, text="Sign in to Microsoft 365 to continue.",
             title="Sign In", timeout=300000)))
         self.dialogs.add(TextPrompt("TextPrompt"))
-        self.dialogs.add(WaterfallDialog("ChatDialog", [self._chat_prompt_step, self._chat_call_step]))
+        # self.dialogs.add(WaterfallDialog("ChatDialog", [self._chat_prompt_step]))
         self.dialogs.add(WaterfallDialog("TranslateDialog", [
             self._translate_ask_lang_step, self._translate_login_step, self._translate_submit_and_wait_step
         ]))
@@ -1076,9 +1076,9 @@ class SBCSBot(TeamsActivityHandler):
         # step.values["prefill"] = step.context.activity.text
         # return await step.begin_dialog("ChatDialog")
 
-    # async def _chat_prompt_step(self, step: WaterfallStepContext):
-    #     text = step.values.get("prefill") or (step.context.activity.text or "")
-    #     return await step.next(text)
+    async def _chat_prompt_step(self, step: WaterfallStepContext):
+        text = step.values.get("prefill") or (step.context.activity.text or "")
+        return await step.next(text)
 
     # async def _chat_call_step(self, step: WaterfallStepContext):
     #     user_q = step.result; client = _aoai()
