@@ -775,11 +775,11 @@ def _result_card(download_url: Optional[str], onedrive_url: Optional[str], has_v
     elif download_url and not has_valid_download:
         # We have a URL but it's not validated, add with warning
         body_text = "Translation completed ⚠️"
-        actions.append({
-            "type": "Action.OpenUrl",
-            "title": "⬇️ Try Download",
-            "url": download_url
-        })
+        # actions.append({
+        #     "type": "Action.OpenUrl",
+        #     "title": "⬇️ Try Download",
+        #     "url": download_url
+        # })
     
     # OneDrive URL is for viewing, not downloading
     if onedrive_url:
