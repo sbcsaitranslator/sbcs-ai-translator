@@ -13,16 +13,6 @@ export PYTHONDONTWRITEBYTECODE=1
 export PIP_ROOT_USER_ACTION=ignore
 export PYTHONPATH="${SITEPKG}:/home/site/wwwroot:/home/site/wwwroot/app:${JOBDIR}"
 
-# ==== File logging (hindari limit stream WebJobs) ====
-LOGDIR="/home/LogFiles/WebJobs/translator-worker"
-mkdir -p "$LOGDIR"
-LOGFILE="$LOGDIR/$(date -u +%F).log"
-
-# Semua output masuk file (console jadi “sunyi” → tidak kena limit baris)
-exec >>"$LOGFILE" 2>&1
-
-echo "[$(date -u +%FT%TZ)] [BOOT] worker start"
-
 trap 'echo "[$(date -u +%FT%TZ)] [INFO] SIGTERM/INT diterima, keluar..."; exit 0' INT TERM
 
 LAUNCH_SRC="${WEBJOBS_NAME:+webjob:${WEBJOBS_NAME}}"
