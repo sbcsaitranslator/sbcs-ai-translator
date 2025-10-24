@@ -1327,7 +1327,7 @@ class SBCSBot(TeamsActivityHandler):
             # Send appropriate success message
             if has_valid_download:
                 await _safe_send(step.context, 
-                    f"🎉 Translation to **{lang_name}** succeeded! Click **Download** to get your file.")
+                    f"🎉 Translation to **{lang_name}** succeeded! Click **View In OneDrive** to view your file.")
             elif od:
                 await _safe_send(step.context, 
                     f"✅ Translation to **{lang_name}** succeeded! Please download your file from OneDrive.")
@@ -1339,7 +1339,7 @@ class SBCSBot(TeamsActivityHandler):
             raw_detail = result.get("detail")
             friendly = "⏰ The request timed out. Please try again." if status == "timeout" else _friendly_error(raw_detail)
             await _safe_send(step.context, friendly)
-            await _safe_send(step.context, MessageFactory.attachment(_retry_or_dismiss_card(src, tgt, filename)))
+            # await _safe_send(step.context, MessageFactory.attachment(_retry_or_dismiss_card(src, tgt, filename)))
         else:
             await _safe_send(step.context, f"❓ Unknown status: {status}")
 
