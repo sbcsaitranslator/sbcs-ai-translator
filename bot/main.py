@@ -766,13 +766,13 @@ def _result_card(download_url: Optional[str], onedrive_url: Optional[str], has_v
     body_text = "Translation completed"
     
     # Only add download button if we have a valid download URL
-    if download_url and has_valid_download:
-        actions.append({
-            "type": "Action.OpenUrl",
-            "title": "⬇️ Download",
-            "url": download_url
-        })
-    elif download_url and not has_valid_download:
+    # if download_url and has_valid_download:
+        # actions.append({
+        #     "type": "Action.OpenUrl",
+        #     "title": "⬇️ Download",
+        #     "url": download_url
+        # })
+    if download_url and not has_valid_download:
         # We have a URL but it's not validated, add with warning
         body_text = "Translation completed ⚠️"
         # actions.append({
